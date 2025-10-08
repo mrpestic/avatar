@@ -13,5 +13,5 @@ for i in {1..180}; do
   sleep 1
 done
 
-echo "[entrypoint] starting RunPod handler..."
-exec python -u /handler.py
+echo "[entrypoint] starting RunPod handler (callback-enabled)..."
+exec python -u /handler_callback.py

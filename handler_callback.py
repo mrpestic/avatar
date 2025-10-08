@@ -5,6 +5,7 @@ import logging
 import traceback
 import urllib.request
 import urllib.error
+import runpod
 
 # импортируем исходный handler из их проекта
 # если у тебя основной обработчик в другом файле/имени, поправь импорт ниже
@@ -41,8 +42,10 @@ def handler(job: dict):
     - если задан callback_url, по завершении отдельно шлёт POST с SUCCESS/ERROR
     """
     job_input = job.get("input", {}) or {}
-    callback_url = job_input.get("callback_url")
-    callback_headers = job_input.get("callback_headers")  # опционально: {"Authorization":"Bearer ..."}
+    # берём callback_url/callback_headers из входа или из переменных окружения (если не заданы в job.input)
+    callback_url = job_input.get("callback_url") or os.getenv("CALLBACK_URL")
+    env_headers = os.getenv("CALLBACK_HEADERS")
+    callback_headers = job_input.get("callback_headers") or (json.loads(env_headers) if env_headers else None)  # опционально: {"Authorization":"Bearer ..."}
     meta = {"job_id": job.get("id")}
 
     try:
@@ -84,3 +87,6 @@ def handler(job: dict):
 
         # и в сам ответ тоже вернём ошибку (как раньше делал ранпод)
         return {"error": err_msg, "status": "ERROR"}
+
+# Регистрируем обработчик для RunPod Serverless
+runpod.serverless.start({"handler": handler})

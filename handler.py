@@ -393,4 +393,5 @@ def handler(job):
     
     return {"error": "비디오를를 찾을 수 없습니다."}
 
-runpod.serverless.start({"handler": handler})
+if __name__ == "__main__":
+    runpod.serverless.start({"handler": handler})
