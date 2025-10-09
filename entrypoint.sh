@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if command -v nvidia-smi >/dev/null 2>&1; then
+if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
   echo "[entrypoint] GPU detected, starting ComfyUI..."
   python -u /ComfyUI/main.py --disable-auto-launch --listen 0.0.0.0 --port 8188 &
 
@@ -14,7 +14,7 @@ if command -v nvidia-smi >/dev/null 2>&1; then
     sleep 1
   done
 else
-  echo "[entrypoint] No GPU detected (test phase), skipping ComfyUI boot."
+  echo "[entrypoint] No usable GPU detected (test phase), skipping ComfyUI boot."
 fi
 
 echo "[entrypoint] starting RunPod handler (callback-enabled)..."

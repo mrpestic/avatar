@@ -151,9 +151,13 @@ def get_videos(ws, prompt, input_type="image", person_count="single"):
         if 'gifs' in node_output:
             for video in node_output['gifs']:
                 # fullpath를 이용하여 직접 파일을 읽고 base64로 인코딩 + 경로도 함께 반환
-                with open(video['fullpath'], 'rb') as f:
-                    video_data = base64.b64encode(f.read()).decode('utf-8')
-                videos_output.append({"base64": video_data, "path": video['fullpath']})
+                fullpath = video.get('fullpath') or video.get('filename') or video
+                if fullpath and os.path.exists(fullpath):
+                    with open(fullpath, 'rb') as f:
+                        video_data = base64.b64encode(f.read()).decode('utf-8')
+                    videos_output.append({"base64": video_data, "path": fullpath})
+                else:
+                    logger.warning(f"Comfy history video fullpath not found: {video}")
         output_videos[node_id] = videos_output
 
     return output_videos

@@ -7,6 +7,8 @@ import urllib.request
 import urllib.error
 import runpod
 from runpod.serverless.utils import rp_upload
+import inspect
+import os.path as osp
 
 # импортируем исходный handler из их проекта
 # если у тебя основной обработчик в другом файле/имени, поправь импорт ниже
@@ -21,28 +23,109 @@ def _http_post(url: str, payload: dict, headers: dict | None = None, timeout: in
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return resp.read().decode("utf-8")
 
-def _rp_upload_file_or_bytes(file_path: str | None = None, data_bytes: bytes | None = None, filename: str = "output.mp4") -> str:
-    """Загружает файл/байты в совместимости с разными версиями runpod rp_upload и возвращает URL."""
-    try:
-        # Загрузка файла по пути
-        if file_path and os.path.exists(file_path):
-            if hasattr(rp_upload, "upload_file"):
-                return rp_upload.upload_file(file_path)
-            if hasattr(rp_upload, "upload_file_to_bucket"):
-                return rp_upload.upload_file_to_bucket(file_path)
-            if hasattr(rp_upload, "upload"):
-                return rp_upload.upload(file_path)
+def _rp_upload_file_or_bytes(file_path: str | None = None,
+                             data_bytes: bytes | None = None,
+                             filename: str = "output.mp4") -> str:
+    """
+    Надёжная обёртка над runpod.serverless.utils.rp_upload.*
+    Перебирает валидные сигнатуры и возвращает URL либо "".
+    """
+    bucket = os.getenv("RUNPOD_UPLOAD_BUCKET") or os.getenv("RP_UPLOAD_BUCKET")
+    url = ""
 
-        # Загрузка байтов
-        if data_bytes is not None:
-            if hasattr(rp_upload, "upload_bytes"):
-                return rp_upload.upload_bytes(data_bytes, filename)
-            if hasattr(rp_upload, "upload_bytes_to_bucket"):
-                return rp_upload.upload_bytes_to_bucket(data_bytes, filename)
-    except Exception as e:
-        log.error("rp_upload failed: %s", e)
+    def _sig(fn):
+        try:
+            return str(inspect.signature(fn))
+        except Exception:
+            return "(signature unavailable)"
 
-    return ""
+    # 1) Если есть путь к файлу — пробуем file-аплоад
+    if file_path and osp.exists(file_path):
+        base = osp.basename(file_path) or filename
+
+        # a) upload / upload_file
+        for name in ("upload", "upload_file"):
+            if hasattr(rp_upload, name):
+                fn = getattr(rp_upload, name)
+                try:
+                    log.info("rp_upload.%s%s", name, _sig(fn))
+                    # самый безопасный вызов — просто передать путь
+                    url = fn(file_path)
+                    if isinstance(url, str) and url:
+                        return url
+                except TypeError:
+                    # попробуем именованные, вдруг требуется file_name+file_location
+                    try:
+                        url = fn(file_name=base, file_location=file_path)  # некоторые версии так принимают
+                        if isinstance(url, str) and url:
+                            return url
+                    except Exception as e:
+                        log.info("rp_upload.%s failed: %s", name, e)
+                except Exception as e:
+                    log.info("rp_upload.%s failed: %s", name, e)
+
+        # b) upload_file_to_bucket — перебираем все реальные порядки аргументов
+        if hasattr(rp_upload, "upload_file_to_bucket"):
+            fn = getattr(rp_upload, "upload_file_to_bucket")
+            log.info("rp_upload.upload_file_to_bucket%s", _sig(fn))
+            attempts = []
+            # (file_name, file_location)
+            attempts.append(((), dict(file_name=base, file_location=file_path)))
+            attempts.append(((base, file_path), {}))
+            # (bucket, file_name, file_location)
+            if bucket:
+                attempts.append(((bucket, base, file_path), {}))
+                attempts.append(((), dict(bucket=bucket, file_name=base, file_location=file_path)))
+                # (bucket, file_location)
+                attempts.append(((bucket, file_path), {}))
+                attempts.append(((), dict(bucket=bucket, file_location=file_path)))
+
+            for args, kwargs in attempts:
+                try:
+                    url = fn(*args, **kwargs)
+                    if isinstance(url, str) and url:
+                        return url
+                except Exception as e:
+                    log.info("rp_upload.upload_file_to_bucket failed (%s %s): %s", args, kwargs, e)
+
+    # 2) Если передали байты — пробуем bytes-аплоад
+    if data_bytes is not None:
+        base = filename
+
+        if hasattr(rp_upload, "upload_bytes"):
+            fn = getattr(rp_upload, "upload_bytes")
+            log.info("rp_upload.upload_bytes%s", _sig(fn))
+            attempts = [
+                ((data_bytes, base), {}),         # (data_bytes, file_name)
+                ((base, data_bytes), {}),         # (file_name, data_bytes)
+                ((), dict(data_bytes=data_bytes, file_name=base))
+            ]
+            for args, kwargs in attempts:
+                try:
+                    url = fn(*args, **kwargs)
+                    if isinstance(url, str) and url:
+                        return url
+                except Exception as e:
+                    log.info("rp_upload.upload_bytes failed (%s %s): %s", args, kwargs, e)
+
+        if hasattr(rp_upload, "upload_bytes_to_bucket") and bucket:
+            fn = getattr(rp_upload, "upload_bytes_to_bucket")
+            log.info("rp_upload.upload_bytes_to_bucket%s", _sig(fn))
+            attempts = [
+                ((bucket, base, data_bytes), {}),
+                ((bucket, data_bytes, base), {}),
+                ((), dict(bucket=bucket, file_name=base, data_bytes=data_bytes)),
+                ((), dict(bucket=bucket, data_bytes=data_bytes, file_name=base)),
+            ]
+            for args, kwargs in attempts:
+                try:
+                    url = fn(*args, **kwargs)
+                    if isinstance(url, str) and url:
+                        return url
+                except Exception as e:
+                    log.info("rp_upload.upload_bytes_to_bucket failed (%s %s): %s", args, kwargs, e)
+
+    return url or ""
 
 def _make_success_body(project_id: int | None, video_url: str, message: str = "", audio_b64: str | None = None):
     body = {"project_id": project_id, "video_url": video_url, "status": "success", "message": message}
@@ -105,9 +188,12 @@ def handler(job: dict):
                 except Exception as e:
                     log.warning("Не удалось прочитать аудио для коллбэка: %s", e)
 
-                payload = _make_success_body(project_id, upload_url, audio_b64=audio_b64)
+                if upload_url:
+                    payload = _make_success_body(project_id, upload_url, audio_b64=audio_b64)
+                else:
+                    payload = _make_error_body(project_id, "Video upload failed")
                 _http_post(callback_url, payload, headers=callback_headers)
-                log.info("✅ callback SUCCESS posted to %s", callback_url)
+                log.info("✅ callback posted to %s", callback_url)
             except Exception as e:
                 log.error("❌ callback post failed: %s", e)
         elif callback_url and project_id is None:
