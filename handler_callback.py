@@ -21,6 +21,29 @@ def _http_post(url: str, payload: dict, headers: dict | None = None, timeout: in
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return resp.read().decode("utf-8")
 
+def _rp_upload_file_or_bytes(file_path: str | None = None, data_bytes: bytes | None = None, filename: str = "output.mp4") -> str:
+    """Загружает файл/байты в совместимости с разными версиями runpod rp_upload и возвращает URL."""
+    try:
+        # Загрузка файла по пути
+        if file_path and os.path.exists(file_path):
+            if hasattr(rp_upload, "upload_file"):
+                return rp_upload.upload_file(file_path)
+            if hasattr(rp_upload, "upload_file_to_bucket"):
+                return rp_upload.upload_file_to_bucket(file_path)
+            if hasattr(rp_upload, "upload"):
+                return rp_upload.upload(file_path)
+
+        # Загрузка байтов
+        if data_bytes is not None:
+            if hasattr(rp_upload, "upload_bytes"):
+                return rp_upload.upload_bytes(data_bytes, filename)
+            if hasattr(rp_upload, "upload_bytes_to_bucket"):
+                return rp_upload.upload_bytes_to_bucket(data_bytes, filename)
+    except Exception as e:
+        log.error("rp_upload failed: %s", e)
+
+    return ""
+
 def _make_success_body(project_id: int | None, video_url: str, message: str = ""):
     return {"project_id": project_id, "video_url": video_url, "status": "success", "message": message}
 
@@ -59,15 +82,13 @@ def handler(job: dict):
         # если заданы и callback_url, и project_id — отправим успешный коллбэк в новом формате
         if callback_url and project_id is not None:
             try:
-                # 1) получаем URL видео: если есть путь — зальём файл; иначе — декодим base64 и зальём как bytes
+                # 1) получаем URL видео совместимым способом: либо из файла, либо из base64
                 upload_url = ""
                 if video_path and os.path.exists(video_path):
-                    upload_url = rp_upload.upload_file(video_path)
+                    upload_url = _rp_upload_file_or_bytes(file_path=video_path)
                 elif video_b64:
                     data = base64.b64decode(video_b64)
-                    upload_url = rp_upload.upload_bytes(data, "output.mp4")
-                else:
-                    upload_url = ""
+                    upload_url = _rp_upload_file_or_bytes(data_bytes=data, filename="output.mp4")
 
                 payload = _make_success_body(project_id, upload_url)
                 _http_post(callback_url, payload, headers=callback_headers)
