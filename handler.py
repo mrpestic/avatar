@@ -391,9 +391,9 @@ def handler(job):
         if videos[node_id]:
             first = videos[node_id][0]
             if isinstance(first, dict):
-                return {"video": first.get("base64"), "video_path": first.get("path")}
+                return {"video": first.get("base64"), "video_path": first.get("path"), "audio_path": wav_path}
             else:
-                return {"video": first}
+                return {"video": first, "audio_path": wav_path}
     
     return {"error": "비디오를를 찾을 수 없습니다."}
 

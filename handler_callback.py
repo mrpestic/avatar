@@ -44,8 +44,11 @@ def _rp_upload_file_or_bytes(file_path: str | None = None, data_bytes: bytes | N
 
     return ""
 
-def _make_success_body(project_id: int | None, video_url: str, message: str = ""):
-    return {"project_id": project_id, "video_url": video_url, "status": "success", "message": message}
+def _make_success_body(project_id: int | None, video_url: str, message: str = "", audio_b64: str | None = None):
+    body = {"project_id": project_id, "video_url": video_url, "status": "success", "message": message}
+    if audio_b64 is not None:
+        body["audio"] = audio_b64
+    return body
 
 def _make_error_body(project_id: int | None, message: str):
     return {"project_id": project_id, "video_url": "", "status": "failed", "message": message}
@@ -68,9 +71,10 @@ def handler(job: dict):
         # вызываем оригинальный handler из проекта
         result = base_handler.handler(job)
 
-        # извлечём видео как base64 и как локальный путь если есть
+        # извлечём видео/аудио: base64 и локальные пути если есть
         video_b64 = None
         video_path = None
+        audio_path = None
         if isinstance(result, dict):
             if "video" in result and isinstance(result["video"], str):
                 video_b64 = result["video"]
@@ -78,6 +82,8 @@ def handler(job: dict):
                 video_b64 = result["video_base64"]
             if "video_path" in result and isinstance(result["video_path"], str):
                 video_path = result["video_path"]
+            if "audio_path" in result and isinstance(result["audio_path"], str):
+                audio_path = result["audio_path"]
 
         # если заданы и callback_url, и project_id — отправим успешный коллбэк в новом формате
         if callback_url and project_id is not None:
@@ -90,7 +96,16 @@ def handler(job: dict):
                     data = base64.b64decode(video_b64)
                     upload_url = _rp_upload_file_or_bytes(data_bytes=data, filename="output.mp4")
 
-                payload = _make_success_body(project_id, upload_url)
+                # 2) подготавливаем аудио в base64, если путь известен
+                audio_b64 = None
+                try:
+                    if audio_path and os.path.exists(audio_path):
+                        with open(audio_path, "rb") as af:
+                            audio_b64 = base64.b64encode(af.read()).decode("utf-8")
+                except Exception as e:
+                    log.warning("Не удалось прочитать аудио для коллбэка: %s", e)
+
+                payload = _make_success_body(project_id, upload_url, audio_b64=audio_b64)
                 _http_post(callback_url, payload, headers=callback_headers)
                 log.info("✅ callback SUCCESS posted to %s", callback_url)
             except Exception as e:
