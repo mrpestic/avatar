@@ -150,10 +150,10 @@ def get_videos(ws, prompt, input_type="image", person_count="single"):
         videos_output = []
         if 'gifs' in node_output:
             for video in node_output['gifs']:
-                # fullpath를 이용하여 직접 파일을 읽고 base64로 인코딩
+                # fullpath를 이용하여 직접 파일을 읽고 base64로 인코딩 + 경로도 함께 반환
                 with open(video['fullpath'], 'rb') as f:
                     video_data = base64.b64encode(f.read()).decode('utf-8')
-                videos_output.append(video_data)
+                videos_output.append({"base64": video_data, "path": video['fullpath']})
         output_videos[node_id] = videos_output
 
     return output_videos
@@ -389,7 +389,11 @@ def handler(job):
     # 이미지가 없는 경우 처리
     for node_id in videos:
         if videos[node_id]:
-            return {"video": videos[node_id][0]}
+            first = videos[node_id][0]
+            if isinstance(first, dict):
+                return {"video": first.get("base64"), "video_path": first.get("path")}
+            else:
+                return {"video": first}
     
     return {"error": "비디오를를 찾을 수 없습니다."}
 
