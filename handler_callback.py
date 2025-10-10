@@ -11,6 +11,8 @@ import inspect
 import os.path as osp
 import mimetypes
 import uuid
+import tempfile
+import subprocess
 
 # импортируем исходный handler из их проекта
 # если у тебя основной обработчик в другом файле/имени, поправь импорт ниже
@@ -75,6 +77,63 @@ def _post_file_multipart(url: str, path: str, field_name: str = "file", filename
     req.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return resp.read().decode("utf-8", "ignore")
+
+def _post_fields_multipart(url: str, fields: dict, timeout: int = 600):
+    boundary = uuid.uuid4().hex
+    body = bytearray()
+    add = body.extend
+
+    def _part_hdr(name, ctype=None):
+        add(f"--{boundary}\r\n".encode())
+        disp = f'form-data; name="{name}"'
+        add(f"Content-Disposition: {disp}\r\n".encode())
+        if ctype:
+            add(f"Content-Type: {ctype}\r\n".encode())
+        add(b"\r\n")
+
+    for k, v in (fields or {}).items():
+        _part_hdr(k)
+        add(str(v).encode()); add(b"\r\n")
+
+    add(f"--{boundary}--\r\n".encode())
+    log.info("multipart(fields) build: boundary=%s, body_size=%s bytes, keys=%s", boundary, len(body), list((fields or {}).keys()))
+    req = urllib.request.Request(url, data=bytes(body))
+    req.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read().decode("utf-8", "ignore")
+
+def _have_ffmpeg() -> bool:
+    try:
+        subprocess.run(["ffmpeg", "-version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        return True
+    except Exception:
+        return False
+
+def _transcode_to_1080p(src_path: str) -> str | None:
+    """Транскодирует видео в 1920x1080 H.264 yuv420p. Возвращает путь к новому файлу или None."""
+    if not osp.exists(src_path):
+        return None
+    if not _have_ffmpeg():
+        log.warning("ffmpeg not found; skip 1080p transcode")
+        return None
+    dst_path = osp.splitext(src_path)[0] + "_1080p.mp4"
+    cmd = [
+        "ffmpeg", "-y", "-i", src_path,
+        "-vf", "scale=1920:1080:flags=lanczos",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "17",
+        "-pix_fmt", "yuv420p",
+        "-c:a", "copy",
+        "-movflags", "+faststart",
+        dst_path
+    ]
+    try:
+        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if osp.exists(dst_path) and osp.getsize(dst_path) > 0:
+            log.info("Transcoded to 1080p: %s", dst_path)
+            return dst_path
+    except Exception as e:
+        log.error("ffmpeg transcode failed: %s", e)
+    return None
 
 def _rp_upload_file_or_bytes(file_path: str | None = None,
                              data_bytes: bytes | None = None,
@@ -240,6 +299,8 @@ def handler(job: dict):
 
                 # 1) Пытаемся отправить как multipart/form-data, если у нас есть реальный файл
                 if video_path and os.path.exists(video_path):
+                    # 1080p транскод перед отправкой
+                    tx_path = _transcode_to_1080p(video_path) or video_path
                     meta = {"project_id": project_id, "status": "success", "message": ""}
                     if audio_b64:
                         meta["audio"] = audio_b64
@@ -248,7 +309,7 @@ def handler(job: dict):
                     except Exception:
                         ctype = "application/octet-stream"
                     try:
-                        fsize = os.path.getsize(video_path)
+                        fsize = os.path.getsize(tx_path)
                     except Exception:
                         fsize = None
                     log.info(
@@ -259,7 +320,7 @@ def handler(job: dict):
                         fsize,
                         list(meta.keys()),
                     )
-                    resp = _post_file_multipart(callback_url, video_path, field_name="file", filename="result.mp4", extra_fields=meta)
+                    resp = _post_file_multipart(callback_url, tx_path, field_name="file", filename="result.mp4", extra_fields=meta)
                     log.info("Webhook upload OK: %s", resp[:500])
                 else:
                     # 2) fallback: пробуем через rp_upload / data URL и JSON
@@ -284,8 +345,16 @@ def handler(job: dict):
                         len(payload.get("audio", "")) if isinstance(payload.get("audio", ""), str) else 0,
                         payload.get("project_id"),
                     )
-                    _http_post(callback_url, payload, headers=callback_headers)
-                    log.info("✅ callback posted to %s (url len=%s, audio len=%s)", callback_url, len(upload_url) if upload_url else 0, len(audio_b64) if audio_b64 else 0)
+                    try:
+                _http_post(callback_url, payload, headers=callback_headers)
+                        log.info("✅ callback posted to %s (url len=%s, audio len=%s)", callback_url, len(upload_url) if upload_url else 0, len(audio_b64) if audio_b64 else 0)
+                    except urllib.error.HTTPError as e:
+                        if e.code == 422:
+                            # сервер ожидает multipart form (без файла)
+                            resp = _post_fields_multipart(callback_url, payload)
+                            log.info("✅ callback (multipart fields) posted to %s: %s", callback_url, resp[:200])
+                        else:
+                            raise
             except Exception as e:
                 log.error("❌ callback post failed: %s", e)
         elif callback_url and project_id is None:
@@ -302,8 +371,15 @@ def handler(job: dict):
         if callback_url and project_id is not None:
             try:
                 payload = _make_error_body(project_id, err_msg)
+                try:
                 _http_post(callback_url, payload, headers=callback_headers)
                 log.info("✅ callback ERROR posted to %s", callback_url)
+                except urllib.error.HTTPError as e:
+                    if e.code == 422:
+                        resp = _post_fields_multipart(callback_url, payload)
+                        log.info("✅ callback ERROR (multipart fields) posted to %s: %s", callback_url, resp[:200])
+                    else:
+                        raise
             except Exception as ee:
                 log.error("❌ callback error-post failed: %s", ee)
         elif callback_url and project_id is None:
