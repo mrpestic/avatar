@@ -148,16 +148,25 @@ def get_videos(ws, prompt, input_type="image", person_count="single"):
     for node_id in history['outputs']:
         node_output = history['outputs'][node_id]
         videos_output = []
-        if 'gifs' in node_output:
-            for video in node_output['gifs']:
-                # fullpath를 이용하여 직접 파일을 읽고 base64로 인코딩 + 경로도 함께 반환
+        # Prefer recorded mp4s under 'videos', fallback to 'gifs'
+        if 'videos' in node_output and node_output['videos']:
+            for video in node_output['videos']:
                 fullpath = video.get('fullpath') or video.get('filename') or video
                 if fullpath and os.path.exists(fullpath):
                     with open(fullpath, 'rb') as f:
                         video_data = base64.b64encode(f.read()).decode('utf-8')
                     videos_output.append({"base64": video_data, "path": fullpath})
                 else:
-                    logger.warning(f"Comfy history video fullpath not found: {video}")
+                    logger.warning(f"Comfy history mp4 fullpath not found: {video}")
+        elif 'gifs' in node_output:
+            for video in node_output['gifs']:
+                fullpath = video.get('fullpath') or video.get('filename') or video
+                if fullpath and os.path.exists(fullpath):
+                    with open(fullpath, 'rb') as f:
+                        video_data = base64.b64encode(f.read()).decode('utf-8')
+                    videos_output.append({"base64": video_data, "path": fullpath})
+                else:
+                    logger.warning(f"Comfy history gif fullpath not found: {video}")
         output_videos[node_id] = videos_output
 
     return output_videos
@@ -341,6 +350,27 @@ def handler(job):
     prompt["246"]["inputs"]["value"] = height
     
     prompt["270"]["inputs"]["value"] = max_frame
+
+    # 품질 관련 덮어쓰기 (요청이 있으면 적용)
+    # 비디오 컨바йн(131): crf, frame_rate, pix_fmt, format
+    if "131" in prompt and "inputs" in prompt["131"]:
+        if "crf" in prompt["131"]["inputs"]:
+            prompt["131"]["inputs"]["crf"] = job_input.get("crf", prompt["131"]["inputs"]["crf"])
+        if "frame_rate" in prompt["131"]["inputs"]:
+            prompt["131"]["inputs"]["frame_rate"] = job_input.get("fps", prompt["131"]["inputs"]["frame_rate"])
+        if "pix_fmt" in prompt["131"]["inputs"] and job_input.get("pix_fmt"):
+            prompt["131"]["inputs"]["pix_fmt"] = job_input.get("pix_fmt")
+        if "format" in prompt["131"]["inputs"] and job_input.get("format"):
+            prompt["131"]["inputs"]["format"] = job_input.get("format")
+
+    # 샘플러(128): steps, cfg, denoise_strength
+    if "128" in prompt and "inputs" in prompt["128"]:
+        if "steps" in prompt["128"]["inputs"] and job_input.get("steps") is not None:
+            prompt["128"]["inputs"]["steps"] = job_input.get("steps")
+        if "cfg" in prompt["128"]["inputs"] and job_input.get("cfg") is not None:
+            prompt["128"]["inputs"]["cfg"] = job_input.get("cfg")
+        if "denoise_strength" in prompt["128"]["inputs"] and job_input.get("denoise_strength") is not None:
+            prompt["128"]["inputs"]["denoise_strength"] = job_input.get("denoise_strength")
     
     # 다중 인물용 두 번째 오디오 설정
     if person_count == "multi":
