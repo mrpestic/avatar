@@ -9,6 +9,8 @@ import runpod
 from runpod.serverless.utils import rp_upload
 import inspect
 import os.path as osp
+import mimetypes
+import uuid
 
 # импортируем исходный handler из их проекта
 # если у тебя основной обработчик в другом файле/имени, поправь импорт ниже
@@ -20,8 +22,59 @@ log = logging.getLogger("callback-handler")
 def _http_post(url: str, payload: dict, headers: dict | None = None, timeout: int = 30):
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(url, data=data, headers=headers or {"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read().decode("utf-8")
+            log.info("callback response: %s", body[:256])
+            return body
+    except urllib.error.HTTPError as e:
+        try:
+            err_body = e.read().decode("utf-8")
+        except Exception:
+            err_body = ""
+        log.error("callback HTTPError %s: %s", e.code, err_body[:512])
+        raise
+
+def _post_file_multipart(url: str, path: str, field_name: str = "file", filename: str | None = None, extra_fields: dict | None = None, timeout: int = 600):
+    boundary = uuid.uuid4().hex
+    body = bytearray()
+    add = body.extend
+
+    def _part_hdr(name, filename=None, ctype=None):
+        add(f"--{boundary}\r\n".encode())
+        disp = f'form-data; name="{name}"'
+        if filename:
+            disp += f'; filename="{filename}"'
+        add(f"Content-Disposition: {disp}\r\n".encode())
+        if ctype:
+            add(f"Content-Type: {ctype}\r\n".encode())
+        add(b"\r\n")
+
+    # текстовые поля
+    extra_fields = extra_fields or {}
+    for k, v in extra_fields.items():
+        _part_hdr(k)
+        add(str(v).encode()); add(b"\r\n")
+
+    # файл
+    filename = filename or path.rsplit("/", 1)[-1]
+    ctype = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+    _part_hdr(field_name, filename, ctype)
+    with open(path, "rb") as f:
+        add(f.read())
+    add(b"\r\n")
+
+    # финал
+    add(f"--{boundary}--\r\n".encode())
+
+    log.info(
+        "multipart build: boundary=%s, body_size=%s bytes, filename=%s",
+        boundary, len(body), filename,
+    )
+    req = urllib.request.Request(url, data=bytes(body))
+    req.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
     with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return resp.read().decode("utf-8")
+        return resp.read().decode("utf-8", "ignore")
 
 def _rp_upload_file_or_bytes(file_path: str | None = None,
                              data_bytes: bytes | None = None,
@@ -148,7 +201,12 @@ def handler(job: dict):
     callback_url = job_input.get("webhook_url") or job_input.get("callback_url") or os.getenv("CALLBACK_URL")
     env_headers = os.getenv("CALLBACK_HEADERS")
     callback_headers = job_input.get("callback_headers") or (json.loads(env_headers) if env_headers else None)  # опционально: {"Authorization":"Bearer ..."}
-    project_id = job_input.get("project_id")
+    # приводим project_id к int при наличии
+    raw_project_id = job_input.get("project_id")
+    try:
+        project_id = int(raw_project_id) if raw_project_id is not None else None
+    except Exception:
+        project_id = raw_project_id
 
     try:
         # вызываем оригинальный handler из проекта
@@ -171,15 +229,7 @@ def handler(job: dict):
         # если заданы и callback_url, и project_id — отправим успешный коллбэк в новом формате
         if callback_url and project_id is not None:
             try:
-                # 1) получаем URL видео совместимым способом: либо из файла, либо из base64
-                upload_url = ""
-                if video_path and os.path.exists(video_path):
-                    upload_url = _rp_upload_file_or_bytes(file_path=video_path)
-                elif video_b64:
-                    data = base64.b64decode(video_b64)
-                    upload_url = _rp_upload_file_or_bytes(data_bytes=data, filename="output.mp4")
-
-                # 2) подготавливаем аудио в base64, если путь известен
+                # 0) подготовим аудио base64 (для extra_fields)
                 audio_b64 = None
                 try:
                     if audio_path and os.path.exists(audio_path):
@@ -188,12 +238,54 @@ def handler(job: dict):
                 except Exception as e:
                     log.warning("Не удалось прочитать аудио для коллбэка: %s", e)
 
-                if upload_url:
-                    payload = _make_success_body(project_id, upload_url, audio_b64=audio_b64)
+                # 1) Пытаемся отправить как multipart/form-data, если у нас есть реальный файл
+                if video_path and os.path.exists(video_path):
+                    meta = {"project_id": project_id, "status": "success", "message": ""}
+                    if audio_b64:
+                        meta["audio"] = audio_b64
+                    try:
+                        ctype = mimetypes.guess_type("result.mp4")[0] or "application/octet-stream"
+                    except Exception:
+                        ctype = "application/octet-stream"
+                    try:
+                        fsize = os.path.getsize(video_path)
+                    except Exception:
+                        fsize = None
+                    log.info(
+                        "Webhook multipart: url=%s, headers_keys=%s, field=file, filename=result.mp4, ctype=%s, file_size=%s, extra_fields=%s",
+                        callback_url,
+                        list((callback_headers or {}).keys()),
+                        ctype,
+                        fsize,
+                        list(meta.keys()),
+                    )
+                    resp = _post_file_multipart(callback_url, video_path, field_name="file", filename="result.mp4", extra_fields=meta)
+                    log.info("Webhook upload OK: %s", resp[:500])
                 else:
-                    payload = _make_error_body(project_id, "Video upload failed")
-                _http_post(callback_url, payload, headers=callback_headers)
-                log.info("✅ callback posted to %s", callback_url)
+                    # 2) fallback: пробуем через rp_upload / data URL и JSON
+                    upload_url = ""
+                    if video_b64:
+                        data = base64.b64decode(video_b64)
+                        upload_url = _rp_upload_file_or_bytes(data_bytes=data, filename="output.mp4")
+                    if (not upload_url or not str(upload_url).startswith(("http://", "https://"))) and video_b64:
+                        upload_url = f"data:video/mp4;base64,{video_b64}"
+
+                    if upload_url:
+                        payload = _make_success_body(project_id, upload_url, audio_b64=audio_b64)
+                    else:
+                        payload = _make_error_body(project_id, "Video upload failed")
+                    log.info(
+                        "Webhook JSON: url=%s, headers_keys=%s, keys=%s, video_url_prefix=%s, video_url_len=%s, audio_len=%s, project_id=%s",
+                        callback_url,
+                        list((callback_headers or {}).keys()),
+                        list(payload.keys()),
+                        str(payload.get("video_url", ""))[:32],
+                        len(payload.get("video_url", "")) if isinstance(payload.get("video_url", ""), str) else 0,
+                        len(payload.get("audio", "")) if isinstance(payload.get("audio", ""), str) else 0,
+                        payload.get("project_id"),
+                    )
+                    _http_post(callback_url, payload, headers=callback_headers)
+                    log.info("✅ callback posted to %s (url len=%s, audio len=%s)", callback_url, len(upload_url) if upload_url else 0, len(audio_b64) if audio_b64 else 0)
             except Exception as e:
                 log.error("❌ callback post failed: %s", e)
         elif callback_url and project_id is None:
