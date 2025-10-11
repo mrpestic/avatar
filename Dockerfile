@@ -1,50 +1,70 @@
 # Use specific version of nvidia cuda image
 FROM wlsdml1114/multitalk-base:1.4 as runtime
 
+# Лёгкая сборка по умолчанию (для тестов): 1 — пропускаем ComfyUI и кастомные ноды на этапе билда
+ARG LIGHT_BUILD=1
+ENV PIP_NO_CACHE_DIR=1
+
 # wget 설치 (URL 다운로드를 위해)
 RUN apt-get update && apt-get install -y wget && rm -rf /var/lib/apt/lists/*
 
-RUN pip install -U "huggingface_hub[hf_transfer]"
-RUN pip install runpod websocket-client librosa
+RUN pip install -U --no-cache-dir "huggingface_hub[hf_transfer]"
+RUN pip install --no-cache-dir runpod websocket-client librosa
 
 WORKDIR /
 
-RUN git clone https://github.com/comfyanonymous/ComfyUI.git && \
+RUN if [ "$LIGHT_BUILD" = "0" ]; then \
+    git clone https://github.com/comfyanonymous/ComfyUI.git && \
     cd /ComfyUI && \
-    pip install -r requirements.txt
+    pip install --no-cache-dir -r requirements.txt; \
+    else echo "[build] LIGHT_BUILD=1: skipping ComfyUI clone+deps"; fi
 
-RUN cd /ComfyUI/custom_nodes && \
-    git clone https://github.com/Comfy-Org/ComfyUI-Manager.git && \
+RUN if [ "$LIGHT_BUILD" = "0" ]; then \
+    cd /ComfyUI/custom_nodes && \
+    git clone --depth 1 https://github.com/Comfy-Org/ComfyUI-Manager.git && \
     cd ComfyUI-Manager && \
-    pip install -r requirements.txt
+    pip install --no-cache-dir -r requirements.txt; \
+    else echo "[build] skip ComfyUI-Manager"; fi
 
-RUN cd /ComfyUI/custom_nodes && \
-    git clone https://github.com/city96/ComfyUI-GGUF && \
+RUN if [ "$LIGHT_BUILD" = "0" ]; then \
+    cd /ComfyUI/custom_nodes && \
+    git clone --depth 1 https://github.com/city96/ComfyUI-GGUF && \
     cd ComfyUI-GGUF && \
-    pip install -r requirements.txt
+    pip install --no-cache-dir -r requirements.txt; \
+    else echo "[build] skip ComfyUI-GGUF"; fi
 
-RUN cd /ComfyUI/custom_nodes && \
-    git clone https://github.com/kijai/ComfyUI-KJNodes && \
+RUN if [ "$LIGHT_BUILD" = "0" ]; then \
+    cd /ComfyUI/custom_nodes && \
+    git clone --depth 1 https://github.com/kijai/ComfyUI-KJNodes && \
     cd ComfyUI-KJNodes && \
-    pip install -r requirements.txt
+    pip install --no-cache-dir -r requirements.txt; \
+    else echo "[build] skip KJNodes"; fi
 
-RUN cd /ComfyUI/custom_nodes && \
-    git clone https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite && \
+RUN if [ "$LIGHT_BUILD" = "0" ]; then \
+    cd /ComfyUI/custom_nodes && \
+    git clone --depth 1 https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite && \
     cd ComfyUI-VideoHelperSuite && \
-    pip install -r requirements.txt
+    pip install --no-cache-dir -r requirements.txt; \
+    else echo "[build] skip VideoHelperSuite"; fi
     
-RUN cd /ComfyUI/custom_nodes && \
-    git clone https://github.com/orssorbit/ComfyUI-wanBlockswap
+RUN if [ "$LIGHT_BUILD" = "0" ]; then \
+    cd /ComfyUI/custom_nodes && \
+    git clone --depth 1 https://github.com/orssorbit/ComfyUI-wanBlockswap; \
+    else echo "[build] skip wanBlockswap"; fi
 
-RUN cd /ComfyUI/custom_nodes && \
-    git clone https://github.com/kijai/ComfyUI-MelBandRoFormer && \
+RUN if [ "$LIGHT_BUILD" = "0" ]; then \
+    cd /ComfyUI/custom_nodes && \
+    git clone --depth 1 https://github.com/kijai/ComfyUI-MelBandRoFormer && \
     cd ComfyUI-MelBandRoFormer && \
-    pip install -r requirements.txt
+    pip install --no-cache-dir -r requirements.txt; \
+    else echo "[build] skip MelBandRoFormer"; fi
 
-RUN cd /ComfyUI/custom_nodes && \
-    git clone https://github.com/kijai/ComfyUI-WanVideoWrapper && \
+RUN if [ "$LIGHT_BUILD" = "0" ]; then \
+    cd /ComfyUI/custom_nodes && \
+    git clone --depth 1 https://github.com/kijai/ComfyUI-WanVideoWrapper && \
     cd ComfyUI-WanVideoWrapper && \
-    pip install -r requirements.txt
+    pip install --no-cache-dir -r requirements.txt; \
+    else echo "[build] skip WanVideoWrapper"; fi
 
 
 # Условительная загрузка весов: по умолчанию ИГНОРИРУЕМ на этапе билда (для тестов),
