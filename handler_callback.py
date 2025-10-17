@@ -372,8 +372,8 @@ def handler(job: dict):
             try:
                 payload = _make_error_body(project_id, err_msg)
                 try:
-                _http_post(callback_url, payload, headers=callback_headers)
-                log.info("✅ callback ERROR posted to %s", callback_url)
+                    _http_post(callback_url, payload, headers=callback_headers)
+                    log.info("✅ callback ERROR posted to %s", callback_url)
                 except urllib.error.HTTPError as e:
                     if e.code == 422:
                         resp = _post_fields_multipart(callback_url, payload)
