@@ -346,7 +346,7 @@ def handler(job: dict):
                         payload.get("project_id"),
                     )
                     try:
-                _http_post(callback_url, payload, headers=callback_headers)
+                        _http_post(callback_url, payload, headers=callback_headers)
                         log.info("✅ callback posted to %s (url len=%s, audio len=%s)", callback_url, len(upload_url) if upload_url else 0, len(audio_b64) if audio_b64 else 0)
                     except urllib.error.HTTPError as e:
                         if e.code == 422:
