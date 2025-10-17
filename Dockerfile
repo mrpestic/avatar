@@ -2,9 +2,15 @@
 FROM wlsdml1114/multitalk-base:1.4 AS runtime
 
 ENV PIP_NO_CACHE_DIR=1
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
+ENV CUDA_VISIBLE_DEVICES=0
 
 # wget 설치 (URL 다운로드를 위해)
 RUN apt-get update && apt-get install -y wget && rm -rf /var/lib/apt/lists/*
+
+# Ensure PyTorch with CUDA support (reinstall if needed)
+RUN pip install --no-cache-dir --force-reinstall torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
 
 RUN pip install -U --no-cache-dir "huggingface_hub[hf_transfer]"
 RUN pip install --no-cache-dir runpod websocket-client librosa
