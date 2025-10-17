@@ -3,7 +3,7 @@ set -euo pipefail
 
 if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
   echo "[entrypoint] GPU detected, starting ComfyUI..."
-  # докачиваем веса только в рантайме (чтобы тест-билд был лёгким)
+  # Download weights at runtime if not present
   if [ ! -f /ComfyUI/models/diffusion_models/Wan2_1-InfiniteTalk_Single_Q8.gguf ]; then
     echo "[entrypoint] downloading model weights..."
     wget -q https://huggingface.co/Kijai/WanVideo_comfy_GGUF/resolve/main/InfiniteTalk/Wan2_1-InfiniteTalk_Single_Q8.gguf -O /ComfyUI/models/diffusion_models/Wan2_1-InfiniteTalk_Single_Q8.gguf || true
@@ -26,7 +26,7 @@ if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
     sleep 1
   done
 else
-  echo "[entrypoint] No usable GPU detected (test phase), skipping ComfyUI boot."
+  echo "[entrypoint] No usable GPU detected, skipping ComfyUI boot."
 fi
 
 echo "[entrypoint] starting RunPod handler (callback-enabled)..."
