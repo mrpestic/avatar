@@ -244,7 +244,7 @@
         0
       ],
       "audio_scale": 2.0,
-      "audio_cfg_scale": 4.0,
+      "audio_cfg_scale": 2.0,
       "multi_audio_type": "para",
       "wav2vec_model": [
         "137",
