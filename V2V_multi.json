@@ -52,7 +52,7 @@
       "force_offload": true,
       "scheduler": "dpm++_sde",
       "riflex_freq_index": 0,
-      "denoise_strength": 1,
+      "denoise_strength": 0.8,
       "batched_cfg": false,
       "rope_function": "comfy",
       "start_step": 2,
@@ -243,8 +243,8 @@
         "307",
         0
       ],
-      "audio_scale": 1.5,
-      "audio_cfg_scale": 1,
+      "audio_scale": 2.0,
+      "audio_cfg_scale": 4.0,
       "multi_audio_type": "para",
       "wav2vec_model": [
         "137",
