@@ -45,7 +45,7 @@
   },
   "128": {
     "inputs": {
-      "steps": 7,
+      "steps": 8,
       "cfg": 1.0000000000000002,
       "shift": 11.000000000000002,
       "seed": 2,
@@ -166,7 +166,7 @@
   },
   "138": {
     "inputs": {
-      "lora": "lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors",
+      "lora": "Wan2.1_I2V_14B_FusionX_LoRA.safetensors",
       "strength": 1,
       "low_mem_load": false,
       "merge_loras": false
