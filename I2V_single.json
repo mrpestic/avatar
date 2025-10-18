@@ -234,7 +234,7 @@
       ],
       "fps": 25,
       "audio_scale": 1,
-      "audio_cfg_scale": 1,
+      "audio_cfg_scale": 5,
       "multi_audio_type": "para",
       "wav2vec_model": [
         "137",
