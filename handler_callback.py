@@ -13,6 +13,7 @@ import mimetypes
 import uuid
 import tempfile
 import subprocess
+import time
 
 # импортируем исходный handler из их проекта
 # если у тебя основной обработчик в другом файле/имени, поправь импорт ниже
