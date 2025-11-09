@@ -17,6 +17,7 @@ WORKDIR /
 # Clone ComfyUI and install dependencies
 RUN git clone https://github.com/comfyanonymous/ComfyUI.git && \
     cd /ComfyUI && \
+    git checkout d8d60b56 && \
     pip install --no-cache-dir -r requirements.txt
 
 # Install ComfyUI-Manager
