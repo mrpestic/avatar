@@ -389,17 +389,21 @@ def handler(job):
     http_url = f"http://{server_address}:8188/"
     logger.info(f"Checking HTTP connection to: {http_url}")
     
-    # HTTP 연결 확인 (최대 1분)
+    # HTTP 연결 확인 (최대 3분 - даем время watchdog'у перезапустить ComfyUI)
     max_http_attempts = 180
+    last_error = None
     for http_attempt in range(max_http_attempts):
         try:
             response = urllib.request.urlopen(http_url, timeout=5)
             logger.info(f"HTTP 연결 성공 (시도 {http_attempt+1})")
             break
         except Exception as e:
-            logger.warning(f"HTTP 연결 실패 (시도 {http_attempt+1}/{max_http_attempts}): {e}")
+            last_error = e
+            if http_attempt % 30 == 0:  # Log every 30 seconds
+                logger.warning(f"HTTP 연결 실패 (시도 {http_attempt+1}/{max_http_attempts}): {e} - ComfyUI может перезапускаться...")
             if http_attempt == max_http_attempts - 1:
-                raise Exception("ComfyUI 서버에 연결할 수 없습니다. 서버가 실행 중인지 확인하세요.")
+                logger.error(f"ComfyUI 서버에 연결할 수 없습니다. 마지막 오류: {last_error}")
+                raise Exception(f"ComfyUI 서버에 연결할 수 없습니다. 서버가 실행 중인지 확인하세요. (오류: {last_error})")
             time.sleep(1)
     
     ws = websocket.WebSocket()
