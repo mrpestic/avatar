@@ -24,7 +24,17 @@ log = logging.getLogger("callback-handler")
 
 def _http_post(url: str, payload: dict, headers: dict | None = None, timeout: int = 30):
     data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(url, data=data, headers=headers or {"Content-Type": "application/json"})
+    # Add standard headers to bypass Cloudflare protection
+    default_headers = {
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json, */*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Connection": "keep-alive",
+    }
+    if headers:
+        default_headers.update(headers)
+    req = urllib.request.Request(url, data=data, headers=default_headers)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             body = resp.read().decode("utf-8")
@@ -76,6 +86,9 @@ def _post_file_multipart(url: str, path: str, field_name: str = "file", filename
     )
     req = urllib.request.Request(url, data=bytes(body))
     req.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
+    req.add_header("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+    req.add_header("Accept", "*/*")
+    req.add_header("Connection", "keep-alive")
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return resp.read().decode("utf-8", "ignore")
 
@@ -100,6 +113,9 @@ def _post_fields_multipart(url: str, fields: dict, timeout: int = 600):
     log.info("multipart(fields) build: boundary=%s, body_size=%s bytes, keys=%s", boundary, len(body), list((fields or {}).keys()))
     req = urllib.request.Request(url, data=bytes(body))
     req.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
+    req.add_header("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+    req.add_header("Accept", "*/*")
+    req.add_header("Connection", "keep-alive")
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return resp.read().decode("utf-8", "ignore")
 
