@@ -265,6 +265,21 @@ def _make_success_body(project_id: int | None, video_url: str, message: str = ""
 def _make_error_body(project_id: int | None, message: str):
     return {"project_id": project_id, "video_url": "", "status": "failed", "message": message}
 
+# RunPod POST /job-done реджектит слишком большой JSON (400 Bad Request).
+# Видео уходит через колбек (multipart на твой сервер) пока воркер жив.
+# В ответ RunPod кладём только маленький JSON — без base64.
+def _sanitize_result_for_runpod(result: dict) -> dict:
+    if not isinstance(result, dict):
+        return result
+    out = dict(result)
+    # Убираем base64 видео — оно уже ушло через multipart колбек
+    out.pop("video", None)
+    out.pop("video_base64", None)
+    # Оставляем только легкие поля
+    if "error" not in out:
+        out["status"] = "success"
+    return out
+
 def handler(job: dict):
     """
     Расширенный обработчик:
@@ -377,8 +392,8 @@ def handler(job: dict):
         elif callback_url and project_id is None:
             log.warning("⚠️ webhook_url задан, но project_id отсутствует — пропускаю коллбэк.")
 
-        # вернём обычный ответ как раньше
-        return result
+        # RunPod /job-done: лимит размера JSON — убираем гигантский base64, отдаём только video_url
+        return _sanitize_result_for_runpod(result)
 
     except Exception as e:
         err_msg = f"{e.__class__.__name__}: {e}"
