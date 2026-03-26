@@ -10,7 +10,7 @@ ENV CUDA_VISIBLE_DEVICES=0
 RUN apt-get update && apt-get install -y wget && rm -rf /var/lib/apt/lists/*
 
 RUN pip install -U --no-cache-dir "huggingface_hub[hf_transfer]"
-RUN pip install --no-cache-dir runpod websocket-client librosa
+RUN pip install --no-cache-dir runpod websocket-client librosa boto3
 
 WORKDIR /
 

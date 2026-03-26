@@ -14,6 +14,7 @@ import uuid
 import tempfile
 import subprocess
 import time
+from typing import Any
 
 # импортируем исходный handler из их проекта
 # если у тебя основной обработчик в другом файле/имени, поправь импорт ниже
@@ -265,6 +266,160 @@ def _make_success_body(project_id: int | None, video_url: str, message: str = ""
 def _make_error_body(project_id: int | None, message: str):
     return {"project_id": project_id, "video_url": "", "status": "failed", "message": message}
 
+def _load_json_file(path: str) -> dict | None:
+    try:
+        if not path:
+            return None
+        if not osp.exists(path):
+            return None
+        with open(path, "r", encoding="utf-8") as f:
+            obj = json.load(f)
+        return obj if isinstance(obj, dict) else None
+    except Exception as e:
+        log.warning("Failed to read json file %s: %s", path, e)
+        return None
+
+def _get_s3_credentials(job_input: dict[str, Any]) -> dict[str, str]:
+    """
+    Returns credentials/config for S3 client.
+    Priority:
+      1) job_input fields
+      2) env vars
+      3) local credentials file (job_input.s3_credentials_file / env S3_CREDENTIALS_FILE)
+    File format (json):
+      {
+        "aws_access_key_id": "...",
+        "aws_secret_access_key": "...",
+        "aws_session_token": "... (optional)",
+        "s3_endpoint_url": "https://...",
+        "s3_region": "eu-ro-1",
+        "s3_bucket": "bucket-name"
+      }
+    """
+    # job_input overrides
+    creds: dict[str, str] = {}
+    for k_in, k_out in (
+        ("aws_access_key_id", "aws_access_key_id"),
+        ("aws_secret_access_key", "aws_secret_access_key"),
+        ("aws_session_token", "aws_session_token"),
+        ("s3_endpoint_url", "s3_endpoint_url"),
+        ("s3_region", "s3_region"),
+        ("s3_bucket", "s3_bucket"),
+    ):
+        v = job_input.get(k_in)
+        if isinstance(v, str) and v:
+            creds[k_out] = v
+
+    # env
+    creds.setdefault("aws_access_key_id", os.getenv("AWS_ACCESS_KEY_ID") or os.getenv("S3_ACCESS_KEY_ID") or "")
+    creds.setdefault("aws_secret_access_key", os.getenv("AWS_SECRET_ACCESS_KEY") or os.getenv("S3_SECRET_ACCESS_KEY") or "")
+    creds.setdefault("aws_session_token", os.getenv("AWS_SESSION_TOKEN") or os.getenv("S3_SESSION_TOKEN") or "")
+    creds.setdefault("s3_endpoint_url", os.getenv("S3_ENDPOINT_URL") or "")
+    creds.setdefault("s3_region", os.getenv("S3_REGION") or os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION") or "")
+    creds.setdefault("s3_bucket", os.getenv("S3_BUCKET") or "")
+
+    # local file (only fill missing)
+    cred_file = job_input.get("s3_credentials_file") or os.getenv("S3_CREDENTIALS_FILE") or ""
+    if isinstance(cred_file, str) and cred_file:
+        obj = _load_json_file(cred_file) or {}
+        if isinstance(obj, dict):
+            for key in ("aws_access_key_id", "aws_secret_access_key", "aws_session_token", "s3_endpoint_url", "s3_region", "s3_bucket"):
+                if not creds.get(key) and isinstance(obj.get(key), str) and obj.get(key):
+                    creds[key] = obj[key]
+
+    # normalize empties
+    return {k: v for k, v in creds.items() if isinstance(v, str)}
+
+# Upload result video to external storage and return an URL.
+# Preferred: S3-compatible bucket (RunPod "S3 API access" for network volume).
+def _upload_video_and_get_url(
+    *,
+    video_path: str | None,
+    video_b64: str | None,
+    project_id: int | str | None,
+    job_input: dict[str, Any],
+) -> str:
+    # 0) Try S3-compatible bucket first (RunPod S3 API access)
+    s3_prefix = (job_input.get("s3_prefix") or os.getenv("S3_PREFIX") or "infinitetalk").strip("/")
+    s3_expires_in = int(job_input.get("s3_expires_in") or os.getenv("S3_PRESIGN_EXPIRES_IN") or "86400")
+
+    s3_creds = _get_s3_credentials(job_input)
+    s3_bucket = s3_creds.get("s3_bucket") or ""
+    s3_endpoint_url = s3_creds.get("s3_endpoint_url") or ""
+    s3_region = s3_creds.get("s3_region") or ""
+    aws_access_key_id = s3_creds.get("aws_access_key_id") or ""
+    aws_secret_access_key = s3_creds.get("aws_secret_access_key") or ""
+    aws_session_token = s3_creds.get("aws_session_token") or ""
+
+    if s3_bucket and s3_endpoint_url and aws_access_key_id and aws_secret_access_key:
+        try:
+            try:
+                import boto3  # type: ignore
+                from botocore.config import Config  # type: ignore
+            except Exception as e:
+                log.warning("boto3 not available, skip S3 upload: %s", e)
+                boto3 = None  # type: ignore
+                Config = None  # type: ignore
+
+            if boto3 and Config:
+                # Path-style addressing works best with custom endpoints like runpod.io
+                cfg = Config(signature_version="s3v4", s3={"addressing_style": "path"})
+                s3 = boto3.client(
+                    "s3",
+                    endpoint_url=s3_endpoint_url,
+                    region_name=s3_region,
+                    aws_access_key_id=aws_access_key_id,
+                    aws_secret_access_key=aws_secret_access_key,
+                    aws_session_token=aws_session_token,
+                    config=cfg,
+                )
+
+                pid = str(project_id) if project_id is not None else "no_project"
+                key = f"{s3_prefix}/{pid}/{uuid.uuid4().hex}.mp4"
+
+                upload_path = None
+                if video_path and os.path.exists(video_path):
+                    upload_path = _transcode_to_1080p(video_path) or video_path
+                elif video_b64:
+                    # materialize bytes to a temp file for reliable multipart upload
+                    tmp_dir = tempfile.mkdtemp(prefix="infinitetalk_s3_")
+                    upload_path = osp.join(tmp_dir, "output.mp4")
+                    with open(upload_path, "wb") as f:
+                        f.write(base64.b64decode(video_b64))
+
+                if upload_path and osp.exists(upload_path):
+                    extra_args = {"ContentType": "video/mp4"}
+                    s3.upload_file(upload_path, s3_bucket, key, ExtraArgs=extra_args)
+                    url = s3.generate_presigned_url(
+                        "get_object",
+                        Params={"Bucket": s3_bucket, "Key": key},
+                        ExpiresIn=s3_expires_in,
+                    )
+                    if isinstance(url, str) and url:
+                        log.info("S3 upload OK: bucket=%s key=%s expires_in=%s endpoint=%s", s3_bucket, key, s3_expires_in, s3_endpoint_url)
+                        return url
+        except Exception as e:
+            log.warning("S3 upload failed, fallback to rp_upload: %s", e)
+
+    # 1) Fallback to rp_upload (RunPod helper) if S3 is not configured/failed
+    try:
+        if video_path and os.path.exists(video_path):
+            tx_path = _transcode_to_1080p(video_path) or video_path
+            url = _rp_upload_file_or_bytes(file_path=tx_path, filename="output.mp4")
+            return url or ""
+    except Exception as e:
+        log.warning("upload via file_path failed: %s", e)
+
+    try:
+        if video_b64:
+            data = base64.b64decode(video_b64)
+            url = _rp_upload_file_or_bytes(data_bytes=data, filename="output.mp4")
+            return url or ""
+    except Exception as e:
+        log.warning("upload via base64 bytes failed: %s", e)
+
+    return ""
+
 # RunPod POST /job-done реджектит слишком большой JSON (400 Bad Request).
 # Видео уходит через колбек (multipart на твой сервер) пока воркер жив.
 # В ответ RunPod кладём только маленький JSON — без base64.
@@ -290,6 +445,8 @@ def handler(job: dict):
     job_input = job.get("input", {}) or {}
     # webhook_url и project_id НЕ обязательны; если оба заданы — отправим коллбэк
     callback_url = job_input.get("webhook_url") or job_input.get("callback_url") or os.getenv("CALLBACK_URL")
+    disable_callback = bool(job_input.get("disable_callback", False))
+    upload_result = bool(job_input.get("upload_result", True))
     env_headers = os.getenv("CALLBACK_HEADERS")
     callback_headers = job_input.get("callback_headers") or (json.loads(env_headers) if env_headers else None)  # опционально: {"Authorization":"Bearer ..."}
     # приводим project_id к int при наличии
@@ -317,8 +474,26 @@ def handler(job: dict):
             if "audio_path" in result and isinstance(result["audio_path"], str):
                 audio_path = result["audio_path"]
 
+        # 0) Preferred delivery: upload the result and return a URL in RunPod output,
+        # so your backend can expose it from /status without needing webhook delivery.
+        if upload_result and isinstance(result, dict):
+            try:
+                video_url = _upload_video_and_get_url(
+                    video_path=video_path,
+                    video_b64=video_b64,
+                    project_id=project_id,
+                    job_input=job_input,
+                )
+                if video_url:
+                    result["video_url"] = video_url
+                    log.info("✅ result uploaded, video_url=%s...", str(video_url)[:64])
+                else:
+                    log.warning("⚠️ upload_result enabled but video_url is empty (no file/base64 or upload failed)")
+            except Exception as e:
+                log.warning("⚠️ upload_result failed: %s", e)
+
         # если заданы и callback_url, и project_id — отправим успешный коллбэк в новом формате
-        if callback_url and project_id is not None:
+        if (not disable_callback) and callback_url and project_id is not None:
             try:
                 # 0) подготовим аудио base64 (для extra_fields)
                 audio_b64 = None
@@ -389,7 +564,7 @@ def handler(job: dict):
                             raise
             except Exception as e:
                 log.error("❌ callback post failed: %s", e)
-        elif callback_url and project_id is None:
+        elif (not disable_callback) and callback_url and project_id is None:
             log.warning("⚠️ webhook_url задан, но project_id отсутствует — пропускаю коллбэк.")
 
         # RunPod /job-done: лимит размера JSON — убираем гигантский base64, отдаём только video_url
