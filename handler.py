@@ -44,6 +44,10 @@ def download_file_from_url(url, output_path):
 def save_base64_to_file(base64_data, temp_dir, output_filename):
     """Base64 데이터를 파일로 저장하는 함수"""
     try:
+        # data URL 형식이면 prefix 제거: "data:...;base64,<payload>"
+        if isinstance(base64_data, str) and "base64," in base64_data:
+            base64_data = base64_data.split("base64,", 1)[1]
+
         # Base64 문자열 디코딩
         decoded_data = base64.b64decode(base64_data)
         
@@ -60,6 +64,28 @@ def save_base64_to_file(base64_data, temp_dir, output_filename):
     except (binascii.Error, ValueError) as e:
         logger.error(f"❌ Base64 디코딩 실패: {e}")
         raise Exception(f"Base64 디코딩 실패: {e}")
+
+def _guess_mime_type(path: str, default: str) -> str:
+    _, ext = os.path.splitext(path.lower())
+    if ext == ".mp4":
+        return "video/mp4"
+    if ext == ".webm":
+        return "video/webm"
+    if ext == ".gif":
+        return "image/gif"
+    if ext == ".wav":
+        return "audio/wav"
+    if ext == ".mp3":
+        return "audio/mpeg"
+    if ext in (".jpg", ".jpeg"):
+        return "image/jpeg"
+    if ext == ".png":
+        return "image/png"
+    return default
+
+def _file_to_base64(path: str) -> str:
+    with open(path, "rb") as f:
+        return base64.b64encode(f.read()).decode("utf-8")
 
 def process_input(input_data, temp_dir, output_filename, input_type):
     """입력 데이터를 처리하여 파일 경로를 반환하는 함수"""
@@ -148,12 +174,19 @@ def get_videos(ws, prompt, input_type="image", person_count="single"):
     for node_id in history['outputs']:
         node_output = history['outputs'][node_id]
         videos_output = []
-        if 'gifs' in node_output:
-            for video in node_output['gifs']:
-                # fullpath를 이용하여 직접 파일을 읽고 base64로 인코딩
-                with open(video['fullpath'], 'rb') as f:
-                    video_data = base64.b64encode(f.read()).decode('utf-8')
-                videos_output.append(video_data)
+        # ComfyUI 출력은 환경/노드에 따라 "gifs" 또는 "videos" 키를 사용함
+        for key in ("gifs", "videos"):
+            if key not in node_output:
+                continue
+            for video in node_output[key]:
+                # fullpath 우선 사용 (가장 빠름). 없으면 /view로 조회
+                if isinstance(video, dict) and video.get("fullpath") and os.path.exists(video["fullpath"]):
+                    videos_output.append(_file_to_base64(video["fullpath"]))
+                    continue
+
+                if isinstance(video, dict) and all(k in video for k in ("filename", "subfolder", "type")):
+                    file_bytes = get_image(video["filename"], video["subfolder"], video["type"])
+                    videos_output.append(base64.b64encode(file_bytes).decode("utf-8"))
         output_videos[node_id] = videos_output
 
     return output_videos
@@ -389,7 +422,15 @@ def handler(job):
     # 이미지가 없는 경우 처리
     for node_id in videos:
         if videos[node_id]:
-            return {"video": videos[node_id][0]}
+            video_b64 = videos[node_id][0]
+
+            out = {
+                "status": "success",
+                # 명시적인 base64 필드 (요청하신 형태)
+                "video_base64": video_b64,
+            }
+
+            return out
     
     return {"error": "비디오를를 찾을 수 없습니다."}
 
