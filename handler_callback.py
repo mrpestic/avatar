@@ -127,6 +127,30 @@ def _have_ffmpeg() -> bool:
     except Exception:
         return False
 
+def _as_bool(v) -> bool:
+    if isinstance(v, bool):
+        return v
+    if v is None:
+        return False
+    if isinstance(v, (int, float)):
+        return v != 0
+    if isinstance(v, str):
+        return v.strip().lower() in ("1", "true", "yes", "y", "on")
+    return False
+
+def _maybe_transcode_for_delivery(src_path: str, job_input: dict[str, Any]) -> str:
+    """
+    By default we DO NOT transcode (preserve original resolution/aspect).
+    Enable only when explicitly requested:
+      - input.transcode_1080p = true  OR env TRANSCODE_1080P=true
+    """
+    if not src_path or not osp.exists(src_path):
+        return src_path
+    enabled = _as_bool(job_input.get("transcode_1080p")) or _as_bool(os.getenv("TRANSCODE_1080P"))
+    if not enabled:
+        return src_path
+    return _transcode_to_1080p(src_path) or src_path
+
 def _transcode_to_1080p(src_path: str) -> str | None:
     """Транскодирует видео в 1920x1080 H.264 yuv420p. Возвращает путь к новому файлу или None."""
     if not osp.exists(src_path):
@@ -330,8 +354,51 @@ def _get_s3_credentials(job_input: dict[str, Any]) -> dict[str, str]:
     # normalize empties
     return {k: v for k, v in creds.items() if isinstance(v, str)}
 
+def _get_r2_config(job_input: dict[str, Any]) -> dict[str, str]:
+    """
+    Cloudflare R2 config (S3-compatible).
+    Environment variables (primary):
+      EFFECTS_R2_ACCOUNT_ID
+      EFFECTS_BUCKET_NAME
+      EFFECTS_ACCESS_KEY
+      EFFECTS_SECRET_KEY
+      EFFECTS_PUBLIC_URL (optional; if set we return public URL instead of presigned)
+      EFFECTS_PREFIX (optional; default "infinitetalk")
+      EFFECTS_EXPIRES_IN (optional; default 86400, for presigned)
+
+    job_input overrides (optional):
+      effects_r2_account_id, effects_bucket_name, effects_access_key, effects_secret_key,
+      effects_public_url, effects_prefix, effects_expires_in, effects_url_mode ("public"|"presigned")
+    """
+    def _get(name_in: str, env: str) -> str:
+        v = job_input.get(name_in)
+        if isinstance(v, str) and v:
+            return v
+        return os.getenv(env) or ""
+
+    account_id = _get("effects_r2_account_id", "EFFECTS_R2_ACCOUNT_ID")
+    bucket = _get("effects_bucket_name", "EFFECTS_BUCKET_NAME")
+    access_key = _get("effects_access_key", "EFFECTS_ACCESS_KEY")
+    secret_key = _get("effects_secret_key", "EFFECTS_SECRET_KEY")
+    public_url = _get("effects_public_url", "EFFECTS_PUBLIC_URL").rstrip("/")
+    prefix = (_get("effects_prefix", "EFFECTS_PREFIX") or "infinitetalk").strip("/")
+    expires_in = str(job_input.get("effects_expires_in") or os.getenv("EFFECTS_EXPIRES_IN") or "86400")
+    url_mode = _get("effects_url_mode", "EFFECTS_URL_MODE").lower()  # "public"|"presigned"|"" (auto)
+
+    endpoint_url = f"https://{account_id}.r2.cloudflarestorage.com" if account_id else ""
+    return {
+        "endpoint_url": endpoint_url,
+        "bucket": bucket,
+        "access_key": access_key,
+        "secret_key": secret_key,
+        "public_url": public_url,
+        "prefix": prefix,
+        "expires_in": expires_in,
+        "url_mode": url_mode,
+    }
+
 # Upload result video to external storage and return an URL.
-# Preferred: S3-compatible bucket (RunPod "S3 API access" for network volume).
+# Preferred: Cloudflare R2 bucket (EFFECTS_*). Fallback: RunPod S3 / rp_upload.
 def _upload_video_and_get_url(
     *,
     video_path: str | None,
@@ -339,7 +406,67 @@ def _upload_video_and_get_url(
     project_id: int | str | None,
     job_input: dict[str, Any],
 ) -> str:
-    # 0) Try S3-compatible bucket first (RunPod S3 API access)
+    # 0) Try Cloudflare R2 (S3-compatible) first
+    r2 = _get_r2_config(job_input)
+    if r2.get("endpoint_url") and r2.get("bucket") and r2.get("access_key") and r2.get("secret_key"):
+        try:
+            try:
+                import boto3  # type: ignore
+                from botocore.config import Config  # type: ignore
+            except Exception as e:
+                log.warning("boto3 not available, skip R2 upload: %s", e)
+                boto3 = None  # type: ignore
+                Config = None  # type: ignore
+
+            if boto3 and Config:
+                cfg = Config(signature_version="s3v4", s3={"addressing_style": "path"})
+                s3 = boto3.client(
+                    "s3",
+                    endpoint_url=r2["endpoint_url"],
+                    region_name="auto",
+                    aws_access_key_id=r2["access_key"],
+                    aws_secret_access_key=r2["secret_key"],
+                    config=cfg,
+                )
+
+                pid = str(project_id) if project_id is not None else "no_project"
+                key = f"{r2['prefix']}/{pid}/{uuid.uuid4().hex}.mp4"
+
+                upload_path = None
+                if video_path and os.path.exists(video_path):
+                    upload_path = _maybe_transcode_for_delivery(video_path, job_input)
+                elif video_b64:
+                    tmp_dir = tempfile.mkdtemp(prefix="infinitetalk_r2_")
+                    upload_path = osp.join(tmp_dir, "output.mp4")
+                    with open(upload_path, "wb") as f:
+                        f.write(base64.b64decode(video_b64))
+
+                if upload_path and osp.exists(upload_path):
+                    extra_args = {"ContentType": "video/mp4"}
+                    s3.upload_file(upload_path, r2["bucket"], key, ExtraArgs=extra_args)
+
+                    mode = r2.get("url_mode") or ""
+                    if (mode == "public") or (mode == "" and r2.get("public_url")):
+                        public_base = r2.get("public_url", "").rstrip("/")
+                        if public_base:
+                            return f"{public_base}/{key}"
+
+                    # presigned fallback
+                    try:
+                        exp = int(r2.get("expires_in") or "86400")
+                    except Exception:
+                        exp = 86400
+                    url = s3.generate_presigned_url(
+                        "get_object",
+                        Params={"Bucket": r2["bucket"], "Key": key},
+                        ExpiresIn=exp,
+                    )
+                    if isinstance(url, str) and url:
+                        return url
+        except Exception as e:
+            log.warning("R2 upload failed, fallback to S3/rp_upload: %s", e)
+
+    # 1) Try S3-compatible bucket (RunPod S3 API access)
     s3_prefix = (job_input.get("s3_prefix") or os.getenv("S3_PREFIX") or "infinitetalk").strip("/")
     s3_expires_in = int(job_input.get("s3_expires_in") or os.getenv("S3_PRESIGN_EXPIRES_IN") or "86400")
 
@@ -379,7 +506,7 @@ def _upload_video_and_get_url(
 
                 upload_path = None
                 if video_path and os.path.exists(video_path):
-                    upload_path = _transcode_to_1080p(video_path) or video_path
+                    upload_path = _maybe_transcode_for_delivery(video_path, job_input)
                 elif video_b64:
                     # materialize bytes to a temp file for reliable multipart upload
                     tmp_dir = tempfile.mkdtemp(prefix="infinitetalk_s3_")
@@ -401,10 +528,10 @@ def _upload_video_and_get_url(
         except Exception as e:
             log.warning("S3 upload failed, fallback to rp_upload: %s", e)
 
-    # 1) Fallback to rp_upload (RunPod helper) if S3 is not configured/failed
+    # 2) Fallback to rp_upload (RunPod helper) if S3 is not configured/failed
     try:
         if video_path and os.path.exists(video_path):
-            tx_path = _transcode_to_1080p(video_path) or video_path
+            tx_path = _maybe_transcode_for_delivery(video_path, job_input)
             url = _rp_upload_file_or_bytes(file_path=tx_path, filename="output.mp4")
             return url or ""
     except Exception as e:
@@ -424,16 +551,24 @@ def _upload_video_and_get_url(
 # Видео уходит через колбек (multipart на твой сервер) пока воркер жив.
 # В ответ RunPod кладём только маленький JSON — без base64.
 def _sanitize_result_for_runpod(result: dict) -> dict:
+    """
+    RunPod result should be small and stable.
+    We return ONLY:
+      - status: "success" | "failed"
+      - video_url: string (may be empty on failure)
+    """
     if not isinstance(result, dict):
-        return result
-    out = dict(result)
-    # Убираем base64 видео — оно уже ушло через multipart колбек
-    out.pop("video", None)
-    out.pop("video_base64", None)
-    # Оставляем только легкие поля
-    if "error" not in out:
-        out["status"] = "success"
-    return out
+        return {"status": "failed", "video_url": ""}
+
+    if result.get("error"):
+        return {"status": "failed", "video_url": ""}
+
+    video_url = result.get("video_url")
+    if isinstance(video_url, str) and video_url:
+        return {"status": "success", "video_url": video_url}
+
+    # Generation might have succeeded but upload didn't; for /status consumers it's a failure.
+    return {"status": "failed", "video_url": ""}
 
 def handler(job: dict):
     """
@@ -506,8 +641,7 @@ def handler(job: dict):
 
                 # 1) Пытаемся отправить как multipart/form-data, если у нас есть реальный файл
                 if video_path and os.path.exists(video_path):
-                    # 1080p транскод перед отправкой
-                    tx_path = _transcode_to_1080p(video_path) or video_path
+                    tx_path = _maybe_transcode_for_delivery(video_path, job_input)
                     meta = {"project_id": project_id, "status": "success", "message": ""}
                     if audio_b64:
                         meta["audio"] = audio_b64
@@ -592,8 +726,8 @@ def handler(job: dict):
         elif callback_url and project_id is None:
             log.warning("⚠️ webhook_url задан, но project_id отсутствует — пропускаю коллбэк ошибки.")
 
-        # и в сам ответ тоже вернём ошибку (как раньше делал ранпод)
-        return {"error": err_msg, "status": "ERROR"}
+        # Keep RunPod result minimal (no error text, no large payloads)
+        return {"status": "failed", "video_url": ""}
 
 # Регистрируем обработчик для RunPod Serverless
 runpod.serverless.start({"handler": handler})
